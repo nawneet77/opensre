@@ -38,6 +38,7 @@ def _rule(
     action: GuardrailAction = GuardrailAction.REDACT,
     patterns: tuple[str, ...] = (),
     keywords: tuple[str, ...] = (),
+    replacement: str = "",
 ) -> GuardrailRule:
     """Mirror tests/test_guardrails/test_engine.py's helper. Kept local so the
     tests do not import the engine test module."""
@@ -47,7 +48,7 @@ def _rule(
         action=action,
         patterns=compiled,
         keywords=tuple(k.lower() for k in keywords),
-        replacement="",
+        replacement=replacement,
     )
 
 
@@ -278,6 +279,87 @@ def test_overlapping_matches_merge_into_single_redaction(
     # Wider match wins; output contains exactly one redaction marker.
     assert out.count("[REDACTED:") == 1
     assert "[REDACTED:wide]" in out
+
+
+def test_audit_action_is_logged_but_not_redacted(
+    stub_capture: list[dict[str, Any]],
+) -> None:
+    """AUDIT means 'log only' in the engine. Streaming must not redact AUDIT
+    matches because that would silently censor text that the LLM path passes
+    through unchanged. Engine parity matters here so a team running AUDIT
+    rules to observe agent behaviour gets the same output in both paths.
+    """
+    engine = GuardrailEngine(
+        [_rule(name="watch_passwords", action=GuardrailAction.AUDIT, keywords=("password",))]
+    )
+    audit = MagicMock()
+    stream = GuardrailStream(engine, audit_logger=audit)
+
+    out = stream.feed("user typed password=hunter2\n")
+
+    # Original text passes through untouched.
+    assert out == "user typed password=hunter2\n"
+    # But the audit logger still receives the match for forensic purposes.
+    assert audit.log.call_count == 1
+    assert audit.log.call_args.kwargs["rule_name"] == "watch_passwords"
+    # And the analytics event still fires so dashboards can count detections.
+    assert len(stub_capture) == 1
+
+
+def test_audit_match_alongside_redact_match_only_redacts_redact(
+    stub_capture: list[dict[str, Any]],
+) -> None:
+    """A chunk that trips both an AUDIT and a REDACT rule must redact only
+    the REDACT span and leave the AUDIT span visible. The audit logger must
+    still receive both matches so the AUDIT rule's forensic intent is
+    preserved even when the chunk also contained a REDACT-action secret."""
+    engine = GuardrailEngine(
+        [
+            _rule(name="aws_key", action=GuardrailAction.REDACT, patterns=("AKIA[0-9A-Z]{16}",)),
+            _rule(name="watch_email", action=GuardrailAction.AUDIT, keywords=("@example.com",)),
+        ]
+    )
+    audit = MagicMock()
+    stream = GuardrailStream(engine, audit_logger=audit)
+
+    out = stream.feed("user=alice@example.com key=AKIAIOSFODNN7EXAMPLE\n")
+
+    # AUDIT match stays visible.
+    assert "alice@example.com" in out
+    # REDACT match is replaced.
+    assert "AKIAIOSFODNN7EXAMPLE" not in out
+    assert "[REDACTED:aws_key]" in out
+    # Both matches reached the audit logger (REDACT and AUDIT).
+    assert audit.log.call_count == 2
+    audited_rules = {call.kwargs["rule_name"] for call in audit.log.call_args_list}
+    assert audited_rules == {"aws_key", "watch_email"}
+
+
+def test_custom_rule_replacement_is_honored(
+    stub_capture: list[dict[str, Any]],
+) -> None:
+    """Rules can configure a custom ``replacement`` string (e.g. ``[PII]``).
+    The streaming path must use that string, mirroring the engine's
+    :meth:`_get_replacement` behaviour, so the same secret is replaced
+    identically in LLM and stdout output."""
+    engine = GuardrailEngine(
+        [
+            _rule(
+                name="email",
+                action=GuardrailAction.REDACT,
+                patterns=(r"[\w.+-]+@[\w-]+\.[\w.-]+",),
+                replacement="[PII]",
+            )
+        ]
+    )
+    stream = GuardrailStream(engine)
+
+    out = stream.feed("user contact alice@example.com here\n")
+
+    assert "alice@example.com" not in out
+    # The custom replacement wins. The default [REDACTED:email] must NOT appear.
+    assert "[PII]" in out
+    assert "[REDACTED:" not in out
 
 
 def test_block_action_is_redacted_not_raised(

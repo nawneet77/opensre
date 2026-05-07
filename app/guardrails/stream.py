@@ -21,9 +21,12 @@ chunk that contained at least one match.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from app.analytics.cli import capture_agent_secret_detected
 from app.guardrails.audit import AuditLogger
 from app.guardrails.engine import GuardrailEngine, ScanMatch
+from app.guardrails.rules import GuardrailAction
 
 _DEFAULT_MAX_CHUNK_LEN = 4096
 
@@ -34,9 +37,11 @@ class GuardrailStream:
     Flushes whenever the buffer contains a newline (the natural boundary for
     most CLI output) and force-flushes once the buffer reaches
     ``max_chunk_len`` so a runaway no-newline stream cannot grow without
-    bound. Any detected secret is replaced with ``[REDACTED:<rule_name>]``
-    in the returned string and logged via the optional audit logger so the
-    original is quarantined.
+    bound. Detected secrets are replaced with the rule's configured
+    ``replacement`` (default ``[REDACTED:<rule_name>]``) and logged via the
+    optional audit logger so the original is quarantined. AUDIT-action
+    matches are logged but pass through unchanged, mirroring
+    :meth:`GuardrailEngine.apply`.
     """
 
     def __init__(
@@ -79,8 +84,6 @@ class GuardrailStream:
         if not result.matches:
             return text
 
-        # Quarantine for audit (mirrors GuardrailEngine.apply behavior so the
-        # streaming code path leaves the same forensic trail as the LLM path).
         if self._audit is not None:
             for m in result.matches:
                 self._audit.log(
@@ -95,7 +98,7 @@ class GuardrailStream:
             count=len(result.matches),
             blocked=result.blocked,
         )
-        return _redact_intervals(text, result.matches)
+        return _redact_intervals(text, result.matches, self._engine._get_replacement)
 
 
 def _split_at_boundary(buffer: str, max_chunk_len: int) -> tuple[str, str]:
@@ -114,19 +117,28 @@ def _split_at_boundary(buffer: str, max_chunk_len: int) -> tuple[str, str]:
     return "", buffer
 
 
-def _redact_intervals(text: str, matches: tuple[ScanMatch, ...]) -> str:
-    """Replace match ranges with ``[REDACTED:<rule_name>]``, merging overlapping spans.
+def _redact_intervals(
+    text: str,
+    matches: tuple[ScanMatch, ...],
+    get_replacement: Callable[[str], str],
+) -> str:
+    """Replace match ranges with their per-rule replacement, merging overlapping spans.
 
-    Mirrors :meth:`GuardrailEngine._redact`'s overlap-merge but processes
-    every match (REDACT and BLOCK alike) because the streaming wrapper
-    promotes BLOCK to REDACT to keep the stream open. The widest source
-    match wins on rule-name selection, matching engine behavior so output
-    looks consistent across the LLM and agent-stdout code paths.
+    AUDIT-action matches are filtered out here so the streaming path mirrors
+    :meth:`GuardrailEngine._redact`: AUDIT means "log only", not "replace".
+    REDACT and BLOCK matches are processed; BLOCK is included because the
+    streaming wrapper promotes BLOCK to REDACT to keep the stream open.
+
+    The widest source match wins on rule-name selection, matching engine
+    behavior so output looks consistent across the LLM and agent-stdout
+    code paths. ``get_replacement`` is :meth:`GuardrailEngine._get_replacement`
+    so custom ``rule.replacement`` values are honored.
     """
-    if not matches:
+    redactable = [m for m in matches if m.action != GuardrailAction.AUDIT]
+    if not redactable:
         return text
 
-    sorted_matches = sorted(matches, key=lambda m: (m.start, -m.end))
+    sorted_matches = sorted(redactable, key=lambda m: (m.start, -m.end))
     # Each merged span tracks (start, end, rule_name, source_width).
     # source_width is the width of the contributing match that owns the
     # rule_name, so that chained-overlap merges keep picking the widest
@@ -146,5 +158,5 @@ def _redact_intervals(text: str, matches: tuple[ScanMatch, ...]) -> str:
 
     out = text
     for start, end, name, _ in reversed(merged):
-        out = out[:start] + f"[REDACTED:{name}]" + out[end:]
+        out = out[:start] + get_replacement(name) + out[end:]
     return out
