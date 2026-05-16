@@ -110,7 +110,6 @@ class TempoMixin:
                 component="app.services.grafana.tempo",
                 method="query_tempo",
                 datasource_uid=self.tempo_datasource_uid,
-                extras={"service_name": service_name},
             )
 
             return {

@@ -307,7 +307,7 @@ class GrafanaClientBase:
                 logger=logger,
                 component="app.services.grafana.base",
                 method="query_alert_rules",
-                extras={"folder": folder} if folder else None,
+                extras={"folder": folder} if folder is not None else None,
             )
             return []
 
