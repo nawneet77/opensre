@@ -234,9 +234,7 @@ class TestTempoMixin:
         mock_report.assert_not_called()
 
     @patch("app.services.grafana.tempo.report_grafana_failure")
-    def test_query_tempo_aggregates_per_trace_failures_into_one_event(
-        self, mock_report
-    ):
+    def test_query_tempo_aggregates_per_trace_failures_into_one_event(self, mock_report):
         """Multiple failed _get_trace_details lookups inside one query_tempo
         call must coalesce into a single Sentry event so a degraded Tempo
         endpoint doesn't fan out into N events per query."""
