@@ -182,7 +182,8 @@ class TestQueryLokiExceptions:
         host = _FakeLokiHost()
         host.make_request_mock.side_effect = RuntimeError("connection refused")
 
-        result = host.query_loki(_QUERY)
+        with patch("app.services.grafana.loki.report_grafana_failure") as mock_report:
+            result = host.query_loki(_QUERY)
 
         assert result == {
             "success": False,
@@ -190,6 +191,11 @@ class TestQueryLokiExceptions:
             "response": "",
             "logs": [],
         }
+        mock_report.assert_called_once()
+        kwargs = mock_report.call_args.kwargs
+        assert kwargs["component"] == "app.services.grafana.loki"
+        assert kwargs["method"] == "query_loki"
+        assert kwargs["datasource_uid"] == "loki-uid"
 
     def test_exception_with_response_includes_status_and_truncated_text(self) -> None:
         host = _FakeLokiHost()
@@ -200,13 +206,15 @@ class TestQueryLokiExceptions:
         err.response = response  # type: ignore[attr-defined]
         host.make_request_mock.side_effect = err
 
-        result = host.query_loki(_QUERY)
+        with patch("app.services.grafana.loki.report_grafana_failure") as mock_report:
+            result = host.query_loki(_QUERY)
 
         assert result["success"] is False
         assert result["error"] == "Loki query failed: 502"
         assert result["response"] == long_text[:300]
         assert len(result["response"]) == 300
         assert result["logs"] == []
+        mock_report.assert_called_once()
 
     def test_exception_with_none_response_falls_back_to_str_error(self) -> None:
         host = _FakeLokiHost()
@@ -214,11 +222,13 @@ class TestQueryLokiExceptions:
         err.response = None  # type: ignore[attr-defined]
         host.make_request_mock.side_effect = err
 
-        result = host.query_loki(_QUERY)
+        with patch("app.services.grafana.loki.report_grafana_failure") as mock_report:
+            result = host.query_loki(_QUERY)
 
         assert result["success"] is False
         assert result["error"] == "transport error"
         assert result["response"] == ""
+        mock_report.assert_called_once()
 
 
 # ---------------------------------------------------------------------------

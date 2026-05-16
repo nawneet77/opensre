@@ -44,12 +44,18 @@ class TestTempoMixin:
         client = FakeGrafanaClient()
         client._make_request = Mock(side_effect=Exception("Connection timeout"))
 
-        result = client.query_tempo(service_name="auth-service")
+        with patch("app.services.grafana.tempo.report_grafana_failure") as mock_report:
+            result = client.query_tempo(service_name="auth-service")
 
         assert result["success"] is False
         assert result["error"] == "Connection timeout"
         assert result["response"] == ""
         assert result["traces"] == []
+        mock_report.assert_called_once()
+        kwargs = mock_report.call_args.kwargs
+        assert kwargs["component"] == "app.services.grafana.tempo"
+        assert kwargs["method"] == "query_tempo"
+        assert kwargs["datasource_uid"] == "tempo-uid-abc"
 
     def test_query_tempo_http_exception_with_response(self):
         """Test exception handling when the exception contains a response object."""
@@ -64,11 +70,13 @@ class TestTempoMixin:
 
         client._make_request = Mock(side_effect=MockException("HTTP Error"))
 
-        result = client.query_tempo(service_name="auth-service")
+        with patch("app.services.grafana.tempo.report_grafana_failure") as mock_report:
+            result = client.query_tempo(service_name="auth-service")
 
         assert result["success"] is False
         assert result["error"] == "Tempo query failed: 403"
         assert "Permission denied" in result["response"]
+        mock_report.assert_called_once()
 
     @patch("app.services.grafana.tempo.requests.get")
     def test_query_tempo_successful_trace_parsing(self, mock_requests_get):
@@ -139,16 +147,22 @@ class TestTempoMixin:
         assert span["attributes"]["db.system"] == "postgresql"
         assert span["attributes"]["http.status_code"] == 200
 
+    @patch("app.services.grafana.tempo.report_grafana_failure")
     @patch("app.services.grafana.tempo.requests.get")
-    def test_get_trace_details_network_failure(self, mock_requests_get):
+    def test_get_trace_details_network_failure(self, mock_requests_get, mock_report):
         """Test _get_trace_details graceful degradation on network error."""
         client = FakeGrafanaClient()
         mock_requests_get.side_effect = Exception("Requests connection error")
 
         result = client._get_trace_details(trace_id="trace-123")
 
-        # Should catch the error and return empty spans gracefully
+        # Should catch the error and return empty spans gracefully + capture to Sentry
         assert result == {"spans": []}
+        mock_report.assert_called_once()
+        kwargs = mock_report.call_args.kwargs
+        assert kwargs["component"] == "app.services.grafana.tempo"
+        assert kwargs["method"] == "_get_trace_details"
+        assert kwargs["extras"] == {"trace_id": "trace-123"}
 
     def test_extract_span_attributes_edge_cases(self):
         """Test extraction of various attribute types."""
@@ -172,17 +186,32 @@ class TestTempoMixin:
         assert "empty_value" not in attributes
         assert "" not in attributes
 
+    @patch("app.services.grafana.tempo.report_grafana_failure")
     @patch("app.services.grafana.tempo.requests.get")
-    def test_get_trace_details_non_200_status(self, mock_requests_get):
-        """Test _get_trace_details when the API returns a non-200 status."""
+    def test_get_trace_details_non_200_status(self, mock_requests_get, mock_report):
+        """Test _get_trace_details when the API returns a non-200 status.
+
+        After issue #1461 the non-200 path is routed through raise_for_status,
+        so it now reports to Sentry instead of failing silently.
+        """
+        import requests as requests_module
+
         client = FakeGrafanaClient()
 
-        # Setup mock to return a 404 status code
+        # Setup mock to raise HTTPError on raise_for_status (real requests behavior on non-200)
         mock_response = Mock()
         mock_response.status_code = 404
+        mock_response.raise_for_status.side_effect = requests_module.HTTPError(
+            "404 Not Found",
+            response=mock_response,
+        )
         mock_requests_get.return_value = mock_response
 
         result = client._get_trace_details(trace_id="trace-123")
 
-        # Assert it safely falls back to empty spans
+        # Assert it safely falls back to empty spans AND captured the non-200 to Sentry
         assert result == {"spans": []}
+        mock_report.assert_called_once()
+        kwargs = mock_report.call_args.kwargs
+        assert kwargs["component"] == "app.services.grafana.tempo"
+        assert kwargs["method"] == "_get_trace_details"

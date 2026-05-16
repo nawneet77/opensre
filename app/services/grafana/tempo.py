@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 import requests
 
-from app.utils.errors import report_exception
+from app.services.grafana._telemetry import report_grafana_failure
 
 if TYPE_CHECKING:
     from app.services.grafana.base import GrafanaClientBase
@@ -75,12 +75,21 @@ class TempoMixin:
                 "service_name": service_name,
                 "account_id": self.account_id,
             }
-        except Exception as e:
-            error_msg = str(e)
+        except Exception as exc:
+            error_msg = str(exc)
             response_text = ""
-            if hasattr(e, "response") and e.response is not None:
-                response_text = e.response.text[:300]
-                error_msg = f"Tempo query failed: {e.response.status_code}"
+            if hasattr(exc, "response") and exc.response is not None:
+                response_text = exc.response.text[:300]
+                error_msg = f"Tempo query failed: {exc.response.status_code}"
+
+            report_grafana_failure(
+                exc,
+                logger=logger,
+                component="app.services.grafana.tempo",
+                method="query_tempo",
+                datasource_uid=self.tempo_datasource_uid,
+                extras={"service_name": service_name},
+            )
 
             return {
                 "success": False,
@@ -112,42 +121,35 @@ class TempoMixin:
                 headers=self._get_auth_headers(),
                 timeout=10,
             )
+            response.raise_for_status()
+            trace_data = response.json()
+            spans = []
 
-            if response.status_code == 200:
-                trace_data = response.json()
-                spans = []
+            if "batches" in trace_data:
+                for batch in trace_data["batches"]:
+                    if "scopeSpans" in batch:
+                        for scope in batch["scopeSpans"]:
+                            if "spans" in scope:
+                                for span in scope["spans"]:
+                                    attributes = self._extract_span_attributes(span)  # type: ignore[attr-defined]
+                                    spans.append(
+                                        {
+                                            "name": span.get("name", "unknown"),
+                                            "attributes": attributes,
+                                        }
+                                    )
 
-                if "batches" in trace_data:
-                    for batch in trace_data["batches"]:
-                        if "scopeSpans" in batch:
-                            for scope in batch["scopeSpans"]:
-                                if "spans" in scope:
-                                    for span in scope["spans"]:
-                                        attributes = self._extract_span_attributes(span)  # type: ignore[attr-defined]
-                                        spans.append(
-                                            {
-                                                "name": span.get("name", "unknown"),
-                                                "attributes": attributes,
-                                            }
-                                        )
-
-                return {"spans": spans}
+            return {"spans": spans}
         except Exception as exc:
-            report_exception(
+            report_grafana_failure(
                 exc,
                 logger=logger,
-                message="Failed to fetch Tempo trace spans",
-                severity="warning",
-                tags={
-                    "surface": "service_client",
-                    "integration": "grafana",
-                    "component": "app.services.grafana.tempo",
-                },
+                component="app.services.grafana.tempo",
+                method="_get_trace_details",
+                datasource_uid=self.tempo_datasource_uid,
                 extras={"trace_id": trace_id},
             )
             return {"spans": []}
-
-        return {"spans": []}
 
     def _extract_span_attributes(  # type: ignore[misc]
         self: GrafanaClientBase,

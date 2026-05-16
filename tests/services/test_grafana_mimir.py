@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from app.services.grafana.mimir import MimirMixin
 
@@ -99,12 +99,18 @@ def test_query_mimir_exception_handling():
 
     client._make_request.side_effect = Exception("Network timeout")
 
-    result = client.query_mimir("cpu_usage_total")
+    with patch("app.services.grafana.mimir.report_grafana_failure") as mock_report:
+        result = client.query_mimir("cpu_usage_total")
 
     # Requirement: Exception cases / error envelope
     assert result["success"] is False
     assert "Network timeout" in result["error"]
     assert result["metrics"] == []
+    mock_report.assert_called_once()
+    kwargs = mock_report.call_args.kwargs
+    assert kwargs["component"] == "app.services.grafana.mimir"
+    assert kwargs["method"] == "query_mimir"
+    assert kwargs["datasource_uid"] == "mimir_uid_456"
 
 
 def test_query_mimir_http_exception_handling():
@@ -122,10 +128,12 @@ def test_query_mimir_http_exception_handling():
     # 3. Force the mock client to crash using our custom exception
     client._make_request.side_effect = mock_exception
 
-    result = client.query_mimir("cpu_usage_total")
+    with patch("app.services.grafana.mimir.report_grafana_failure") as mock_report:
+        result = client.query_mimir("cpu_usage_total")
 
-    # 4. Verify it hit lines 69-71 and correctly formatted the error
+    # 4. Verify it hit the HTTP-response formatting and captured to Sentry
     assert result["success"] is False
     assert result["error"] == "Mimir query failed: 502"
     assert result["response"] == "Bad Gateway: Mimir database is unreachable"
     assert result["metrics"] == []
+    mock_report.assert_called_once()

@@ -9,6 +9,7 @@ from urllib.parse import quote
 
 import requests
 
+from app.services.grafana._telemetry import report_grafana_failure
 from app.services.grafana.config import GrafanaAccountConfig
 
 logger = logging.getLogger(__name__)
@@ -235,8 +236,13 @@ class GrafanaClientBase:
 
             logger.info("[grafana] Discovered datasource UIDs: %s", result)
             return result
-        except Exception as e:
-            logger.warning("[grafana] Failed to discover datasource UIDs: %s", e)
+        except Exception as exc:
+            report_grafana_failure(
+                exc,
+                logger=logger,
+                component="app.services.grafana.base",
+                method="discover_datasource_uids",
+            )
             return {}
 
     def query_loki_label_values(self, label: str = "service_name") -> list[str]:
@@ -251,8 +257,15 @@ class GrafanaClientBase:
             data = self._make_request(url)
             values: list[str] = data.get("data", [])
             return values
-        except Exception:
-            logger.debug("Failed to fetch Loki label values for %s", label, exc_info=True)
+        except Exception as exc:
+            report_grafana_failure(
+                exc,
+                logger=logger,
+                component="app.services.grafana.base",
+                method="query_loki_label_values",
+                datasource_uid=self.loki_datasource_uid,
+                extras={"label": label},
+            )
             return []
 
     def query_alert_rules(self, folder: str | None = None) -> list[dict[str, Any]]:
@@ -288,8 +301,14 @@ class GrafanaClientBase:
                             }
                         )
             return rules
-        except Exception as e:
-            logger.warning("[grafana] Failed to query alert rules: %s", e)
+        except Exception as exc:
+            report_grafana_failure(
+                exc,
+                logger=logger,
+                component="app.services.grafana.base",
+                method="query_alert_rules",
+                extras={"folder": folder} if folder else None,
+            )
             return []
 
     def _get_auth_headers(self) -> dict[str, str]:
