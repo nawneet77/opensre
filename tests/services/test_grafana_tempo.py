@@ -226,11 +226,13 @@ class TestTempoMixin:
         client = FakeGrafanaClient()
         mock_requests_get.side_effect = Exception("Connection refused")
 
-        collected: list[str] = []
+        collected: list[tuple[str, Exception]] = []
         result = client._get_trace_details(trace_id="trace-zzz", failures_out=collected)
 
         assert result == {"spans": []}
-        assert collected == ["trace-zzz"]
+        assert len(collected) == 1
+        assert collected[0][0] == "trace-zzz"
+        assert isinstance(collected[0][1], Exception)
         mock_report.assert_not_called()
 
     @patch("app.services.grafana.tempo.report_grafana_failure")
@@ -269,3 +271,5 @@ class TestTempoMixin:
         assert kwargs["extras"]["failed_count"] == 3
         assert kwargs["extras"]["total_count"] == 3
         assert kwargs["extras"]["first_failed_trace_id"] == "trace-a"
+        assert kwargs["extras"]["first_failed_exception_type"] == "Exception"
+        assert "Tempo degraded" in kwargs["extras"]["first_failed_exception_message"]
