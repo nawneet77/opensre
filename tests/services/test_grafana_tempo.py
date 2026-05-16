@@ -215,3 +215,59 @@ class TestTempoMixin:
         kwargs = mock_report.call_args.kwargs
         assert kwargs["component"] == "app.services.grafana.tempo"
         assert kwargs["method"] == "_get_trace_details"
+
+    @patch("app.services.grafana.tempo.report_grafana_failure")
+    @patch("app.services.grafana.tempo.requests.get")
+    def test_get_trace_details_with_failures_out_defers_capture(
+        self, mock_requests_get, mock_report
+    ):
+        """When failures_out is provided, the per-call Sentry capture is
+        skipped and the trace_id is appended for batch-level reporting."""
+        client = FakeGrafanaClient()
+        mock_requests_get.side_effect = Exception("Connection refused")
+
+        collected: list[str] = []
+        result = client._get_trace_details(trace_id="trace-zzz", failures_out=collected)
+
+        assert result == {"spans": []}
+        assert collected == ["trace-zzz"]
+        mock_report.assert_not_called()
+
+    @patch("app.services.grafana.tempo.report_grafana_failure")
+    def test_query_tempo_aggregates_per_trace_failures_into_one_event(
+        self, mock_report
+    ):
+        """Multiple failed _get_trace_details lookups inside one query_tempo
+        call must coalesce into a single Sentry event so a degraded Tempo
+        endpoint doesn't fan out into N events per query."""
+        client = FakeGrafanaClient()
+        client._make_request = Mock(
+            return_value={
+                "traces": [
+                    {"traceID": "trace-a", "rootServiceName": "auth", "durationMs": 1},
+                    {"traceID": "trace-b", "rootServiceName": "auth", "durationMs": 2},
+                    {"traceID": "trace-c", "rootServiceName": "auth", "durationMs": 3},
+                ]
+            }
+        )
+
+        with patch(
+            "app.services.grafana.tempo.requests.get",
+            side_effect=Exception("Tempo degraded"),
+        ):
+            result = client.query_tempo(service_name="auth-service")
+
+        # Search succeeded, but every detail lookup failed
+        assert result["success"] is True
+        assert result["total_traces"] == 3
+        for enriched in result["traces"]:
+            assert enriched["spans"] == []
+
+        # Exactly one aggregated Sentry event for all three failures
+        mock_report.assert_called_once()
+        kwargs = mock_report.call_args.kwargs
+        assert kwargs["component"] == "app.services.grafana.tempo"
+        assert kwargs["method"] == "_get_trace_details_batch"
+        assert kwargs["extras"]["failed_count"] == 3
+        assert kwargs["extras"]["total_count"] == 3
+        assert kwargs["extras"]["first_failed_trace_id"] == "trace-a"

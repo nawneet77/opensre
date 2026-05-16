@@ -43,7 +43,7 @@ def report_grafana_failure(
         "component": component,
         "method": method,
     }
-    if datasource_uid:
+    if datasource_uid is not None:
         tags["datasource_uid"] = datasource_uid
 
     report_exception(

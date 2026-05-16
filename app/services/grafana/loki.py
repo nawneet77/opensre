@@ -94,7 +94,6 @@ class LokiMixin:
                 component="app.services.grafana.loki",
                 method="query_loki",
                 datasource_uid=self.loki_datasource_uid,
-                extras={"query": query},
             )
 
             return {

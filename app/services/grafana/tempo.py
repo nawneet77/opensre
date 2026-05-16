@@ -54,9 +54,12 @@ class TempoMixin:
             traces = data.get("traces", [])
 
             enriched_traces = []
+            failed_trace_ids: list[str] = []
             for trace in traces:
                 trace_id = trace.get("traceID", "")
-                span_details = self._get_trace_details(trace_id)  # type: ignore[attr-defined]
+                span_details = self._get_trace_details(  # type: ignore[attr-defined]
+                    trace_id, failures_out=failed_trace_ids
+                )
 
                 enriched_traces.append(
                     {
@@ -66,6 +69,25 @@ class TempoMixin:
                         "span_count": trace.get("spanCount", 0),
                         "spans": span_details.get("spans", []),
                     }
+                )
+
+            if failed_trace_ids:
+                # Coalesce per-trace failures into a single Sentry event so a
+                # degraded Tempo endpoint doesn't fan out into N events per
+                # query_tempo call. Static message → Sentry groups all of
+                # them into one issue; counts live in extras.
+                synthetic = RuntimeError("tempo: trace detail lookups failed")
+                report_grafana_failure(
+                    synthetic,
+                    logger=logger,
+                    component="app.services.grafana.tempo",
+                    method="_get_trace_details_batch",
+                    datasource_uid=self.tempo_datasource_uid,
+                    extras={
+                        "failed_count": len(failed_trace_ids),
+                        "total_count": len(traces),
+                        "first_failed_trace_id": failed_trace_ids[0],
+                    },
                 )
 
             return {
@@ -101,14 +123,21 @@ class TempoMixin:
     def _get_trace_details(  # type: ignore[misc]
         self: GrafanaClientBase,
         trace_id: str,
+        *,
+        failures_out: list[str] | None = None,
     ) -> dict[str, Any]:
         """Get detailed span information for a trace.
 
         Args:
-            trace_id: The trace ID to fetch details for
+            trace_id: The trace ID to fetch details for.
+            failures_out: When provided, append ``trace_id`` to this list on
+                failure and skip the per-call Sentry capture. The caller is
+                then expected to fire a single aggregated event after the
+                batch completes. When ``None`` (standalone caller),
+                failures are reported per call as before.
 
         Returns:
-            Dictionary with spans list
+            Dictionary with spans list. ``{"spans": []}`` on failure.
         """
         url = self._build_datasource_url(
             self.tempo_datasource_uid,
@@ -141,14 +170,17 @@ class TempoMixin:
 
             return {"spans": spans}
         except Exception as exc:
-            report_grafana_failure(
-                exc,
-                logger=logger,
-                component="app.services.grafana.tempo",
-                method="_get_trace_details",
-                datasource_uid=self.tempo_datasource_uid,
-                extras={"trace_id": trace_id},
-            )
+            if failures_out is None:
+                report_grafana_failure(
+                    exc,
+                    logger=logger,
+                    component="app.services.grafana.tempo",
+                    method="_get_trace_details",
+                    datasource_uid=self.tempo_datasource_uid,
+                    extras={"trace_id": trace_id},
+                )
+            else:
+                failures_out.append(trace_id)
             return {"spans": []}
 
     def _extract_span_attributes(  # type: ignore[misc]

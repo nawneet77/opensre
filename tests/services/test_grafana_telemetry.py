@@ -58,6 +58,23 @@ class TestReportGrafanaFailureTags:
         tags = mock_report.call_args.kwargs["tags"]  # type: ignore[attr-defined]
         assert tags["datasource_uid"] == "mimir-uid-1"
 
+    def test_empty_string_datasource_uid_still_tagged(self) -> None:
+        """Empty string is a real (if degraded) configuration value and must
+        not be silently dropped — that is itself diagnostic signal."""
+        logger = logging.getLogger("test")
+        exc = RuntimeError("boom")
+
+        mock_report = _call(
+            exc,
+            logger=logger,
+            component="app.services.grafana.loki",
+            method="query_loki",
+            datasource_uid="",
+        )
+
+        tags = mock_report.call_args.kwargs["tags"]  # type: ignore[attr-defined]
+        assert tags["datasource_uid"] == ""
+
     def test_extras_forwarded(self) -> None:
         logger = logging.getLogger("test")
         exc = RuntimeError("boom")

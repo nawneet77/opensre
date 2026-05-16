@@ -81,7 +81,6 @@ class MimirMixin:
                 component="app.services.grafana.mimir",
                 method="query_mimir",
                 datasource_uid=self.mimir_datasource_uid,
-                extras={"query": query},
             )
 
             return {
