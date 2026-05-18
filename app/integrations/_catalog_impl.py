@@ -32,6 +32,7 @@ from app.integrations.config_models import (
     SplunkIntegrationConfig,
     TelegramBotConfig,
     VictoriaLogsIntegrationConfig,
+    WhatsAppConfig,
 )
 from app.integrations.effective_models import EffectiveIntegrations
 from app.integrations.github_mcp import build_github_mcp_config
@@ -470,6 +471,20 @@ def _classify_service_instance(
         if tg_config.bot_token:
             return tg_config.model_dump(), "telegram"
         return None, None
+
+    if key == "whatsapp":
+        try:
+            wa_config = WhatsAppConfig.model_validate(
+                {
+                    "account_sid": credentials.get("account_sid", ""),
+                    "auth_token": credentials.get("auth_token", ""),
+                    "from_number": credentials.get("from_number", ""),
+                    "default_to": credentials.get("default_to"),
+                }
+            )
+        except Exception:
+            return None, None
+        return wa_config.model_dump(), "whatsapp"
 
     if key == "openclaw":
         try:
@@ -1321,6 +1336,20 @@ def load_env_integrations() -> list[dict[str, Any]]:
             }
         )
         integrations.append(_active_env_record("telegram", tg_config.model_dump()))
+
+    wa_account_sid = os.getenv("TWILIO_ACCOUNT_SID", "").strip()
+    wa_auth_token = os.getenv("TWILIO_AUTH_TOKEN", "").strip()
+    wa_from_number = os.getenv("TWILIO_WHATSAPP_FROM", "").strip()
+    if wa_account_sid and wa_auth_token and wa_from_number:
+        wa_config = WhatsAppConfig.model_validate(
+            {
+                "account_sid": wa_account_sid,
+                "auth_token": wa_auth_token,
+                "from_number": wa_from_number,
+                "default_to": os.getenv("WHATSAPP_DEFAULT_TO", "").strip() or None,
+            }
+        )
+        integrations.append(_active_env_record("whatsapp", wa_config.model_dump()))
 
     atlas_pub = os.getenv("MONGODB_ATLAS_PUBLIC_KEY", "").strip()
     atlas_priv = os.getenv("MONGODB_ATLAS_PRIVATE_KEY", "").strip()

@@ -346,6 +346,34 @@ def _verify_telegram(source: str, config: dict[str, Any]) -> dict[str, str]:
     )
 
 
+def _verify_whatsapp(source: str, config: dict[str, Any]) -> dict[str, str]:
+    account_sid = str(config.get("account_sid", "")).strip()
+    auth_token = str(config.get("auth_token", "")).strip()
+    if not account_sid:
+        return result("whatsapp", source, "missing", "Missing account_sid.")
+    if not auth_token:
+        return result("whatsapp", source, "missing", "Missing auth_token.")
+
+    try:
+        response = requests.get(
+            f"https://api.twilio.com/2010-04-01/Accounts/{account_sid}.json",
+            auth=(account_sid, auth_token),
+            timeout=10,
+        )
+        response.raise_for_status()
+        payload = response.json()
+    except Exception as exc:
+        return result("whatsapp", source, "failed", f"Twilio API check failed: {exc}")
+
+    friendly_name = str(payload.get("friendly_name", "")).strip()
+    return result(
+        "whatsapp",
+        source,
+        "passed",
+        f"Connected to Twilio account {friendly_name or account_sid}.",
+    )
+
+
 def _verify_snowflake(source: str, config: dict[str, Any]) -> dict[str, str]:
     account_identifier = str(config.get("account_identifier", "")).strip()
     token = str(config.get("token", "")).strip()
@@ -633,6 +661,7 @@ __all__ = [
     "_verify_tracer",
     "_verify_vercel",
     "_verify_victoria_logs",
+    "_verify_whatsapp",
     "build_probe_verifier",
     "build_validation_verifier",
     "result",
